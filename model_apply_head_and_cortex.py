@@ -6,6 +6,7 @@ import scipy.ndimage
 import torch.nn as nn
 import torch.nn.functional as F
 from numpy.linalg import inv
+from numpy.linalg import det
 if sys.platform=="win32": import psutil # this works for Windows
 else: import resource # Unix specific package, does not exist for Windoze
 from GetFilename import GetFilename
@@ -18,6 +19,15 @@ OUTPUT_RES64 = False
 OUTPUT_NATIVE = True
 OUTPUT_DEBUG = False
 saveprob = False 
+
+code_labels = [ (0, 'unlabeled'), (1, 'parasubiculum'), (2, 'presubiculum'), (3, 'subiculum'),
+                (4, 'CA1'), (5, 'CA3'), (6, 'CA4'), (7, 'GC-DG'), (8, 'HATA'), (9, 'fimbria'),
+                (10, 'molecular_layer_HP'), (11, 'hippocampal_fissure'), (12, 'HP_tail')     ]
+
+code_labels_L = [(c[0]+0,  "L_"+c[1]) for c in code_labels]
+code_labels_R = [(c[0]+100,"R_"+c[1]) for c in code_labels]
+
+
 
 if "-p" in sys.argv[1:]:
     args.remove("-p")
@@ -314,6 +324,8 @@ for fname in sys.argv[1:]:
             outfilename = outfilename.replace(suffix, "")
         outfilename = outfilename + "_tiv.nii.gz"
         img = nibabel.load(fname)
+        if type(img) is nibabel.nifti1.Nifti1Image:
+            img._affine = img.get_qform() # for ANTs compatibility        
     except:
         open(fname + ".warning.txt", "a").write("can't open the file\n")
         print("Warning: can't open file. Skip")
@@ -500,7 +512,16 @@ for fname in sys.argv[1:]:
     fnameL=outfilename.replace("_tiv.nii.gz", "_boxL.nii.gz")
     fnameR=outfilename.replace("_tiv.nii.gz", "_boxR.nii.gz")   
 
+    try:
+        fn_trans = fnameL.replace("_boxL.nii.gz", "_mni0Affine.txt")
+        trans_mat = np.asfarray(open(fn_trans).readlines()[3][12:].split()[:9]).reshape(3,3)
+        scale2native = 0.125 * np.abs(det( trans_mat ))
+    except:
+        print("No transform file found (*_mni0Affine.txt) - can't compute volumes")
+        scale2native = 0    
+
     img = nibabel.load(fnameL)
+    assert np.allclose(det(img.affine), -0.125)    
     assert img.shape == (128, 128, 128)
 
     binput = torch.from_numpy(np.asarray(img.dataobj).astype("float32", copy = False))
@@ -509,26 +530,13 @@ for fname in sys.argv[1:]:
     with torch.no_grad():
         out1 = net(binput[None,None].to(device)).to("cpu")
         out = np.asarray(out1.argmax(dim=1), np.uint8)[0]
-    
-    #output values onscreen
-    vol = out[out > .5].flatten().shape[0] * np.abs(np.linalg.det(img.affine))
-    print(" Estimated total volume of left  hippocampus (mm^3): %d" % vol)
-    volumesL = np.asarray([]) 
-    unique_out = np.sort(np.unique(out))   
-    for i in range (1,unique_out.shape[0]): 
-        volumesL = np.append (volumesL, out[out == unique_out[i]].shape[0] * np.abs(np.linalg.det(img.affine)))
-        print(" Estimated subvolume %2d of left  hippocampus (mm^3): %d" % (unique_out[i], volumesL[-1]))
-    
-    #output values to .csv file
-    csv=open(outfilename.replace("_tiv.nii.gz", "_hippoLR_volumes.csv"), "w")
-    csv.write (" ,Volume Total")
-    for i in range (1,unique_out.shape[0]): csv.write (",Subvolume "+str(unique_out[i]))
-    csv.write ("\n")
-    csv.write ("Hippocampus Left,"+str(volumesL.sum())) 
-    for i in range (0,volumesL.shape[0]): csv.write (","+str(volumesL[i]))
-    csv.write ("\n")
-    
+
     nibabel.Nifti1Image(out, img.affine).to_filename(fnameL.replace("boxL", "boxL_hippo"))
+
+    if scale2native:
+        csv_contentL = ["%d,%s,%4.4f" % (a[0], a[1], b * scale2native)
+                            for a, b in zip(code_labels_L, np.bincount(out.ravel()))][1:] \
+                     + ["99,L_total,%4.4f" % ((out > 0).sum() * scale2native)]
 
     if saveprob:
         outclasses = np.rollaxis(np.asarray(torch.softmax(out1[0], dim=0)), 0, 4)
@@ -538,6 +546,7 @@ for fname in sys.argv[1:]:
         i.to_filename(fnameL.replace("boxL", "boxL_hippo_prob"))
 
     img = nibabel.load(fnameR)
+    assert np.allclose(det(img.affine), -0.125)  
     assert img.shape == (128, 128, 128)
     binput = torch.from_numpy(np.asarray(img.dataobj)[::-1].astype("float32", copy = True)) # x-flip copy since torch doesn't support it
     binput -= binput.mean()
@@ -545,22 +554,13 @@ for fname in sys.argv[1:]:
     with torch.no_grad():
         out1 = net(binput[None,None].to(device)).to("cpu")
         out = np.asarray(out1.argmax(dim=1), np.uint8)[0,::-1]
-
-    #output values onscreen    
-    vol = out[out > .5].flatten().shape[0] * np.abs(np.linalg.det(img.affine))
-    print(" Estimated total volume of right hippocampus (mm^3): %d" % vol)
-    volumesR = np.asarray([]) 
-    unique_out = np.sort(np.unique(out))   
-    for i in range (1,unique_out.shape[0]): 
-        volumesR = np.append (volumesR, out[out == unique_out[i]].shape[0] * np.abs(np.linalg.det(img.affine)))
-        print(" Estimated subvolume %2d of right hippocampus (mm^3): %d" % (unique_out[i], volumesR[-1]))
-
-    #output values to .csv file
-    csv.write ("Hippocampus Right,"+str(volumesR.sum())) 
-    for i in range (0,volumesR.shape[0]): csv.write (","+str(volumesR[i]))
-    csv.close()
-
+    
     nibabel.Nifti1Image(out, img.affine).to_filename(fnameR.replace("boxR", "boxR_hippo"))
+    
+    if scale2native:
+        csv_contentR = ["%d,%s,%4.4f" % (a[0], a[1], b * scale2native)
+                            for a, b in zip(code_labels_R, np.bincount(out.ravel()))][1:] \
+                     + ["199,R_total,%4.4f" % ((out > 0).sum() * scale2native)]
 
     if saveprob:
         outclasses = np.rollaxis(np.asarray(torch.softmax(out1[0], dim=0))[:,::-1], 0, 4)
@@ -568,7 +568,11 @@ for fname in sys.argv[1:]:
         i = nibabel.Nifti1Image(np.clip(outclasses, 0.1, 1), img.affine)
         i.set_data_dtype(np.uint8)
         i.to_filename(fnameR.replace("boxR", "boxR_hippo_prob"))
-    
+
+    if scale2native:
+        with open(fnameL.replace("_boxL.nii.gz", "_hipposubvolumes.csv"), "w") as h:
+            h.writelines(["code,name,volume\n"] + ["%s\n" % x for x in (csv_contentL + csv_contentR)])
+        
     # Call antsApplyTransforms  
     command = '"'+os.path.join(scriptpath,'antsApplyTransforms.exe')+'" '
     command +='-i "'+outfilename.replace("_tiv.nii.gz", "_boxL_hippo.nii.gz")+'" '

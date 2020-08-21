@@ -1,6 +1,6 @@
 # -*- mode: python -*-
 a = Analysis(['model_apply_head_and_cortex.py'],
-             excludes=['lib2to3', 'win32com', 'win32pdh','win32pipe','PIL'],
+             excludes=['lib2to3', 'win32com', 'win32pdh','win32pipe','PIL','certifi','llvmlite','matplotlib','numba','pandas','pytx'],
              hookspath=None,
              runtime_hooks=None)
              
